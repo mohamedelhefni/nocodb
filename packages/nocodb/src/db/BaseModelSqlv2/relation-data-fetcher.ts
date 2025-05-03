@@ -1,4 +1,4 @@
-import { extractFilterFromXwhere, NcApiVersion } from 'nocodb-sdk';
+import { extractFilterFromXwhere, FilterType, NcApiVersion } from 'nocodb-sdk';
 import groupBy from 'lodash/groupBy';
 import type { Logger } from '@nestjs/common';
 import type { IBaseModelSqlV2 } from '~/db/IBaseModelSqlV2';
@@ -10,6 +10,25 @@ import conditionV2 from '~/db/conditionV2';
 import getAst from '~/helpers/getAst';
 
 const GROUP_COL = '__nc_group_id';
+
+// Helper function to change 'like'/'ilike' to 'eq' and 'nlike'/'nilike' to 'neq'
+function convertLikeToEquals(filters: FilterType[]) {
+  if (!filters) return;
+  for (const filter of filters) {
+    if (filter.is_group) {
+      convertLikeToEquals(filter.children);
+    } else {
+      switch (filter.comparison_op) {
+        case 'like':
+          filter.comparison_op = 'eq';
+          break;
+        case 'nlike':
+          filter.comparison_op = 'neq';
+          break;
+      }
+    }
+  }
+}
 
 export const relationDataFetcher = (param: {
   baseModel: IBaseModelSqlV2;
@@ -96,7 +115,7 @@ export const relationDataFetcher = (param: {
                 // get one extra record to check if there are more records in case of v3 api and nested
                 query.limit(
                   (+rest?.limit || 25) +
-                    (apiVersion === NcApiVersion.V3 && nested ? 1 : 0),
+                  (apiVersion === NcApiVersion.V3 && nested ? 1 : 0),
                 );
                 query.offset(+rest?.offset || 0);
 
@@ -232,7 +251,7 @@ export const relationDataFetcher = (param: {
         // get one extra record to check if there are more records in case of v3 api and nested
         qb.limit(
           (+rest?.limit || 25) +
-            (apiVersion === NcApiVersion.V3 && nested ? 1 : 0),
+          (apiVersion === NcApiVersion.V3 && nested ? 1 : 0),
         );
       }
       qb.offset(selectAllRecords ? 0 : +rest?.offset || 0);
@@ -566,7 +585,7 @@ export const relationDataFetcher = (param: {
           // get one extra record to check if there are more records in case of v3 api and nested
           query.limit(
             (+rest?.limit || 25) +
-              (apiVersion === NcApiVersion.V3 && nested ? 1 : 0),
+            (apiVersion === NcApiVersion.V3 && nested ? 1 : 0),
           );
           query.offset(+rest?.offset || 0);
           return baseModel.isSqlite
@@ -796,10 +815,10 @@ export const relationDataFetcher = (param: {
         listArgs = dependencyFields;
         try {
           listArgs.filterArr = JSON.parse(listArgs.filterArrJson);
-        } catch (e) {}
+        } catch (e) { }
         try {
           listArgs.sortArr = JSON.parse(listArgs.sortArrJson);
-        } catch (e) {}
+        } catch (e) { }
       }
 
       const parentTable = await (
@@ -1066,10 +1085,15 @@ export const relationDataFetcher = (param: {
         where,
         aliasColObjMap,
       );
+
+      // *** Add this line to modify the filters ***
+      convertLikeToEquals(filterObj);
+      // *** End of modification ***
+
       await baseModel.getCustomConditionsAndApply({
         column: relColumn,
         view: relColOptions.fk_target_view_id ? childView : null,
-        filters: filterObj,
+        filters: filterObj, // Use the modified filters
         args,
         qb,
         rowId: pid,
@@ -1079,7 +1103,7 @@ export const relationDataFetcher = (param: {
         view: childView,
         qb,
         sort,
-        where,
+        where, // Original where string might still be used here, but conditionV2 uses the modified filterObj
         // condition is applied in getCustomConditionsAndApply and we don't want to apply it again
         onlySort: true,
       });
@@ -1419,13 +1443,12 @@ export const relationDataFetcher = (param: {
       const qb = baseModel
         .dbDriver(isBt ? rtn : tn)
         .where((qb) => {
-          qb.whereNotIn(
-            isBt ? rcn : cn,
+          qb.whereNotExists(
             baseModel
               .dbDriver(isBt ? tn : rtn)
-              .select(isBt ? cn : rcn)
-              .where(
-                _wherePk((isBt ? childTable : parentTable).primaryKeys, cid),
+              .select('*')
+              .whereRaw(
+                `${isBt ? cn : rcn} = ${isBt ? rcn : cn}`
               )
               .whereNotNull(isBt ? cn : rcn),
           ).orWhereNull(isBt ? rcn : cn);
